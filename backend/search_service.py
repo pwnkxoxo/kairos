@@ -131,11 +131,21 @@ def is_tavily_configured() -> bool:
 
 # Explicit phrases that indicate external current information or search requirement
 SEARCH_TRIGGER_PATTERNS = [
-    r"\b(?:search\s+(?:the\s+)?web|google|tavily|browse)\b",
-    r"\b(?:latest|recent|current|breaking|today's|yesterday's)\s+(?:news|events|updates|developments|headlines|scores|prices)\b",
+    r"\b(?:search\s+(?:the\s+)?web|google|tavily|browse\s+(?:the\s+)?web)\b",
+    r"\bsearch\s+(?:for|about)\s+.+\b",
+    # Handles "latest news", "latest Indian news", "latest AI news", "current tech news", "today's headlines", etc.
+    r"\b(?:latest|recent|current|breaking|today'?s?|yesterday'?s?)\s+(?:[a-zA-Z0-9_\-]+\s+){0,3}(?:news|events|updates|developments|headlines|scores|prices)\b",
+    # Handles "news about <topic>", "news in <topic>", "headlines about <topic>"
+    r"\b(?:news|headlines|updates)\s+(?:about|in|on|regarding)\s+.+\b",
+    # Handles "latest developments in AI", "recent developments on Mars"
+    r"\b(?:latest|recent|new)\s+developments\s+(?:in|on|regarding)\s+.+\b",
+    # Handles "what happened today in India", "what happened recently in France"
+    r"\bwhat\s+happened\s+(?:today|yesterday|this\s+week|recently)(?:\s+(?:in|at|to)\s+.+)?\b",
+    r"\bwhat\s+happened\s+(?:in|at|to)\s+.+\s+(?:today|yesterday|recently)\b",
+    # Current officeholders, champions, leaders
+    r"\bcurrent\s+(?:president|prime\s+minister|ceo|governor|champion|price\s+of)\b",
     r"\bwho\s+won\s+(?:the\s+)?(?:match|election|game|tournament|award|cup|medal)\b",
-    r"\b(?:what\s+happened\s+(?:today|yesterday|this\s+week|recently))\b",
-    r"\bcurrent\s+(?:president|prime\s+minister|ceo|governor|champion|price\s+of|weather)\b",
+    r"\bwho\s+is\s+the\s+current\s+(?:president|prime\s+minister|ceo|governor|champion)\b",
 ]
 
 _SEARCH_REGEXES = [re.compile(p, re.IGNORECASE) for p in SEARCH_TRIGGER_PATTERNS]
@@ -145,12 +155,16 @@ def should_search_web(user_message: str) -> bool:
     """
     Determines whether a user query requires current external information
     via Tavily search. Returns False for programming questions, greetings,
-    file actions, and simple math/definitions.
+    file actions, date/time questions, and weather queries.
     """
     cleaned = user_message.strip().lower()
 
     # Direct date/time queries are handled locally, do not search
     if is_direct_datetime_query(cleaned):
+        return False
+
+    # Weather queries are handled by dedicated weather service
+    if re.search(r"\b(?:weather|temperature|forecast|humidity|climate)\b", cleaned):
         return False
 
     # Check search triggers
@@ -216,7 +230,7 @@ def execute_tavily_search(
         raise SearchServiceError(f"Tavily search request failed: {err_msg[:200]}")
 
     raw_results = response.get("results", []) if isinstance(response, dict) else []
-    sanitized_results: List[Dict[str, str]] = []
+    sanitized_results: List[Dict[str, Any]] = []
 
     total_chars = 0
     for item in raw_results:
@@ -224,17 +238,23 @@ def execute_tavily_search(
         url = str(item.get("url", "")).strip()
         raw_snippet = str(item.get("content", "")).strip()
         snippet = raw_snippet[:MAX_SEARCH_SNIPPET_CHARS]
+        pub_date = str(item.get("published_date", "")).strip()
 
         if not url:
             continue
 
+        result_entry: Dict[str, Any] = {"title": title, "url": url, "content": snippet}
+        if pub_date:
+            result_entry["published_date"] = pub_date
+
         if total_chars + len(snippet) > MAX_TOTAL_SEARCH_CONTEXT_CHARS:
             snippet = snippet[: max(0, MAX_TOTAL_SEARCH_CONTEXT_CHARS - total_chars)]
             if snippet:
-                sanitized_results.append({"title": title, "url": url, "content": snippet})
+                result_entry["content"] = snippet
+                sanitized_results.append(result_entry)
             break
 
-        sanitized_results.append({"title": title, "url": url, "content": snippet})
+        sanitized_results.append(result_entry)
         total_chars += len(snippet)
 
     return {
@@ -259,9 +279,15 @@ def format_search_evidence(search_data: Dict[str, Any]) -> Tuple[str, List[Dict[
         title = item["title"]
         url = item["url"]
         content = item["content"]
-        sources.append({"title": title, "url": url})
+        pub_date = item.get("published_date", "")
+        source_entry = {"title": title, "url": url}
+        if pub_date:
+            source_entry["published_date"] = pub_date
+        sources.append(source_entry)
+
+        date_tag = f" (Published: {pub_date})" if pub_date else ""
         evidence_lines.append(
-            f"[Source {idx}]: {title}\nURL: {url}\nContent: {content}\n"
+            f"[Source {idx}]: {title}{date_tag}\nURL: {url}\nContent: {content}\n"
         )
 
     evidence_str = "\n".join(evidence_lines).strip()

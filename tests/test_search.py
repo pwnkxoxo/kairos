@@ -150,6 +150,12 @@ class TestSearchAndTime(unittest.TestCase):
             "Who won the match yesterday?",
             "Who is the current prime minister of UK?",
             "What happened today in politics?",
+            "latest Indian news",
+            "latest AI news",
+            "current tech news",
+            "what happened today in India",
+            "latest developments in quantum computing",
+            "news about space exploration",
         ]
         for q in search_queries:
             self.assertTrue(should_search_web(q), f"Failed for: {q}")
@@ -159,9 +165,35 @@ class TestSearchAndTime(unittest.TestCase):
             "How do I reverse a linked list in Python?",
             "Explain Newton's second law",
             "Create a file notes.txt with hello",
+            "What is today's weather in Adisaptagram?",
+            "current weather in Kolkata",
         ]
         for q in normal_queries:
             self.assertFalse(should_search_web(q), f"False positive for: {q}")
+
+    def test_search_results_preserve_published_date(self):
+        """Tavily search results extract and format publication dates when available."""
+        mock_data = {
+            "query": "latest Indian news",
+            "results": [
+                {
+                    "title": "India Today Headlines",
+                    "url": "https://example.com/india-news",
+                    "content": "Major space and economic updates reported today.",
+                    "published_date": "2026-10-14T08:00:00Z",
+                }
+            ],
+        }
+        evidence_str, sources = format_search_evidence(mock_data)
+        self.assertIn("Published: 2026-10-14T08:00:00Z", evidence_str)
+        self.assertEqual(len(sources), 1)
+        self.assertEqual(sources[0]["published_date"], "2026-10-14T08:00:00Z")
+
+    def test_empty_search_results_formatting(self):
+        """Empty search results return informative message without hallucination."""
+        evidence_str, sources = format_search_evidence({"query": "unknown topic", "results": []})
+        self.assertIn("No relevant search results were returned", evidence_str)
+        self.assertEqual(sources, [])
 
     # --------------------------------------------------------------------------
     # 4. Tavily Execution & Mock Handling

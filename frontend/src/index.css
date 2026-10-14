@@ -1383,6 +1383,22 @@ body {
   font-style: italic;
 }
 
+/* Links */
+.markdown-content a,
+.markdown-content .markdown-link {
+  color: var(--cyan);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  font-weight: 500;
+  transition: color 0.15s ease;
+}
+
+.markdown-content a:hover,
+.markdown-content .markdown-link:hover {
+  color: #38bdf8;
+  text-decoration: underline;
+}
+
 /* Lists */
 .markdown-content ul,
 .markdown-content ol {

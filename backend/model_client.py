@@ -23,7 +23,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 dotenv.load_dotenv(PROJECT_ROOT / ".env", override=False)
 
 DEFAULT_MODEL = "gemma-4-26b-a4b-it"
-MAX_CONTENT_LENGTH = 10000
+MAX_CONTENT_LENGTH = 50000
 
 
 def get_api_key() -> Optional[str]:
@@ -84,8 +84,8 @@ VALID_INTENTS = [
 class GemmaRawOutput(BaseModel):
     supported: bool
     intent: Optional[str] = Field(default=None)
-    assistant_message: str = Field(..., min_length=1, max_length=8000)
-    plan_description: str = Field(default="", max_length=2000)
+    assistant_message: str = Field(..., min_length=1, max_length=64000)
+    plan_description: str = Field(default="", max_length=8000)
     file_content: str = Field(default="", max_length=MAX_CONTENT_LENGTH)
     target_file: Optional[str] = Field(default=None, max_length=300)
 
@@ -389,10 +389,69 @@ def format_context_slice(
 # ------------------------------------------------------------------------------
 # 5. Safe Output Parsing & Validation
 # ------------------------------------------------------------------------------
+def repair_json_escapes(text: str) -> str:
+    """
+    Repairs LaTeX backslashes and single backslashes in JSON strings without
+    corrupting valid escape sequences.
+    """
+    # 1. Escape LaTeX backslashes before common LaTeX command names
+    latex_cmds = (
+        r'(?:frac|begin|end|text|textbf|textit|theta|tau|times|nabla|rho|beta|'
+        r'gamma|alpha|sum|int|cdot|left|right|partial|approx|infty|sqrt|pm|le|ge|'
+        r'neq|equiv|forall|exists|in|notin|subset|cap|cup|vee|wedge|to|rightarrow|'
+        r'leftarrow|mu|sigma|lambda|delta|epsilon|omega|phi|psi)'
+    )
+    repaired = re.sub(r'\\(' + latex_cmds + r'\b)', r'\\\\\1', text)
+    # 2. Fix invalid single backslashes that are not valid JSON escape chars (", \, /, b, f, n, r, t, u)
+    repaired = re.sub(r'\\(?![/"\\bfnrtu])', r'\\\\', repaired)
+    return repaired
+
+
+def extract_fallback_json(text: str) -> Optional[Dict[str, Any]]:
+    """
+    Extracts key fields via regex if JSON decoding fails due to unescaped internal quotes
+    or control characters.
+    """
+    msg_match = re.search(
+        r'"assistant_message"\s*:\s*"(.*?)(?:"\s*,\s*"(?:supported|plan_description|file_content|target_file|intent)"|"\s*\}\s*$)',
+        text,
+        re.DOTALL,
+    )
+    if not msg_match:
+        msg_match = re.search(r'"assistant_message"\s*:\s*"(.*)"\s*\}?$', text, re.DOTALL)
+
+    if msg_match:
+        extracted_msg = msg_match.group(1).replace(r'\"', '"')
+        sup_match = re.search(r'"supported"\s*:\s*(true|false)', text, re.IGNORECASE)
+        supported = sup_match.group(1).lower() == "true" if sup_match else False
+
+        intent_match = re.search(r'"intent"\s*:\s*"([a-zA-Z_]+)"', text)
+        intent = intent_match.group(1) if intent_match else ("create_file" if supported else "general_question")
+
+        plan_match = re.search(r'"plan_description"\s*:\s*"(.*?)"', text, re.DOTALL)
+        plan_desc = plan_match.group(1) if plan_match else ""
+
+        file_match = re.search(r'"file_content"\s*:\s*"(.*?)"', text, re.DOTALL)
+        file_cnt = file_match.group(1) if file_match else ""
+
+        target_match = re.search(r'"target_file"\s*:\s*"([^"]+)"', text)
+        target = target_match.group(1) if target_match else None
+
+        return {
+            "supported": supported,
+            "assistant_message": extracted_msg,
+            "intent": intent,
+            "plan_description": plan_desc,
+            "file_content": file_cnt,
+            "target_file": target,
+        }
+    return None
+
+
 def parse_and_validate_model_output(raw_text: str, model_name: str) -> GemmaPlan:
     """
     Parses and strictly validates the JSON response from Gemma.
-    Rejects malformed, missing, oversized, or incorrectly typed values.
+    Recovers from LaTeX escapes, malformed quotes, and plain text responses.
     """
     if not raw_text or not raw_text.strip():
         raise ModelClientError("Model returned an empty response.")
@@ -404,16 +463,18 @@ def parse_and_validate_model_output(raw_text: str, model_name: str) -> GemmaPlan
         cleaned = re.sub(r"\s*```$", "", cleaned)
         cleaned = cleaned.strip()
 
+    parsed_json: Optional[Dict[str, Any]] = None
     try:
         parsed_json = json.loads(cleaned, strict=False)
     except json.JSONDecodeError:
-        # Fallback: Fix invalid single backslashes in math formulas (e.g. \frac, \int, \alpha)
-        # that are valid LaTeX but invalid JSON string escape sequences
         try:
-            fixed_escapes = re.sub(r'\\(?![/"\\bfnrtu])', r'\\\\', cleaned)
+            fixed_escapes = repair_json_escapes(cleaned)
             parsed_json = json.loads(fixed_escapes, strict=False)
-        except json.JSONDecodeError as e:
-            raise ModelClientError(f"Model returned invalid JSON: {str(e)[:100]}")
+        except json.JSONDecodeError:
+            # Fallback to field extraction via regex
+            parsed_json = extract_fallback_json(cleaned)
+            if not parsed_json:
+                raise ModelClientError("Model returned invalid JSON.")
 
     if not isinstance(parsed_json, dict):
         raise ModelClientError("Model output is not a JSON object.")
@@ -422,7 +483,18 @@ def parse_and_validate_model_output(raw_text: str, model_name: str) -> GemmaPlan
     try:
         validated = GemmaRawOutput(**parsed_json)
     except ValidationError as e:
-        raise ModelClientError(f"Model output schema validation failed: {str(e)[:200]}")
+        # For unsupported conversational responses, recover assistant_message if available
+        if not parsed_json.get("supported") and "assistant_message" in parsed_json and isinstance(parsed_json["assistant_message"], str):
+            validated = GemmaRawOutput(
+                supported=False,
+                intent=parsed_json.get("intent") or "general_question",
+                assistant_message=parsed_json["assistant_message"],
+                plan_description="",
+                file_content="",
+                target_file=None,
+            )
+        else:
+            raise ModelClientError(f"Model output schema validation failed: {str(e)[:200]}")
 
     # Enforce content length ceiling
     if len(validated.file_content) > MAX_CONTENT_LENGTH:

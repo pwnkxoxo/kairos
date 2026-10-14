@@ -210,6 +210,26 @@ def init_db(db_path: Optional[Path] = None) -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_overwrite_confirmations_token ON overwrite_confirmations(token);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_overwrite_confirmations_conv ON overwrite_confirmations(conversation_id);")
 
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS rag_chunks (
+                chunk_id TEXT PRIMARY KEY,
+                doc_id TEXT NOT NULL,
+                conversation_id TEXT,
+                source_type TEXT NOT NULL,
+                source_name TEXT NOT NULL,
+                page_number INTEGER,
+                chunk_index INTEGER NOT NULL,
+                content TEXT NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            );
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_rag_chunks_doc ON rag_chunks(doc_id);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_rag_chunks_conv ON rag_chunks(conversation_id);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_rag_chunks_source ON rag_chunks(source_type);")
+
         cur = conn.execute("SELECT MAX(version) AS cur_ver FROM schema_version;")
         row = cur.fetchone()
         cur_version = row["cur_ver"] if row and row["cur_ver"] is not None else 0
@@ -223,6 +243,11 @@ def init_db(db_path: Optional[Path] = None) -> None:
         if cur_version < 2:
             conn.execute(
                 "INSERT INTO schema_version (version, applied_at) VALUES (2, ?);",
+                (now,),
+            )
+        if cur_version < 3:
+            conn.execute(
+                "INSERT INTO schema_version (version, applied_at) VALUES (3, ?);",
                 (now,),
             )
         conn.commit()
@@ -389,6 +414,9 @@ def delete_conversation(conv_id: str, db_path: Optional[Path] = None) -> Dict[st
         del_cur = conn.execute("DELETE FROM conversations WHERE id = ?;", (conv_id,))
         conv_deleted = del_cur.rowcount > 0
 
+        # Delete conversation-scoped RAG chunks
+        conn.execute("DELETE FROM rag_chunks WHERE conversation_id = ?;", (conv_id,))
+
         # Check which candidate documents are now orphaned (not referenced anywhere)
         for did in candidate_doc_ids:
             ref_check = conn.execute(
@@ -408,6 +436,7 @@ def delete_conversation(conv_id: str, db_path: Optional[Path] = None) -> Dict[st
                         except Exception:
                             pass
                 conn.execute("DELETE FROM documents WHERE doc_id = ?;", (did,))
+                conn.execute("DELETE FROM rag_chunks WHERE doc_id = ?;", (did,))
 
         conn.commit()
 
@@ -1018,6 +1047,128 @@ def get_and_consume_overwrite_confirmation(
             "consumed_at": now,
         }
         return True, record, "ok"
+
+
+# ------------------------------------------------------------------------------
+# 8. RAG Knowledge & Document Chunk Operations
+# ------------------------------------------------------------------------------
+def store_rag_chunks(chunks: List[Dict[str, Any]], db_path: Optional[Path] = None) -> int:
+    """
+    Persists document/knowledge chunks in the rag_chunks table.
+    Each chunk dict must have:
+      chunk_id, doc_id, conversation_id (optional), source_type, source_name,
+      page_number (optional), chunk_index, content, metadata_json (optional).
+    """
+    if not chunks:
+        return 0
+
+    now = datetime.now(timezone.utc).isoformat()
+    rows = []
+    for c in chunks:
+        cid = c.get("chunk_id") or str(uuid.uuid4())
+        meta = c.get("metadata_json")
+        if isinstance(meta, dict):
+            meta_str = json.dumps(meta)
+        elif isinstance(meta, str):
+            meta_str = meta
+        else:
+            meta_str = "{}"
+
+        rows.append((
+            cid,
+            c["doc_id"],
+            c.get("conversation_id"),
+            c.get("source_type", "pdf"),
+            c.get("source_name", "document"),
+            c.get("page_number"),
+            c.get("chunk_index", 0),
+            c["content"],
+            meta_str,
+            now,
+        ))
+
+    with get_connection(db_path) as conn:
+        conn.executemany(
+            """
+            INSERT OR REPLACE INTO rag_chunks (
+                chunk_id, doc_id, conversation_id, source_type, source_name,
+                page_number, chunk_index, content, metadata_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """,
+            rows,
+        )
+        conn.commit()
+    return len(rows)
+
+
+def delete_rag_chunks_for_doc(doc_id: str, db_path: Optional[Path] = None) -> int:
+    """Deletes all chunks associated with a specific doc_id."""
+    with get_connection(db_path) as conn:
+        cur = conn.execute("DELETE FROM rag_chunks WHERE doc_id = ?;", (doc_id,))
+        conn.commit()
+        return cur.rowcount
+
+
+def delete_rag_chunks_for_conversation(conv_id: str, db_path: Optional[Path] = None) -> int:
+    """Deletes all chunks attached to a specific conversation."""
+    with get_connection(db_path) as conn:
+        cur = conn.execute("DELETE FROM rag_chunks WHERE conversation_id = ?;", (conv_id,))
+        conn.commit()
+        return cur.rowcount
+
+
+def query_rag_chunks(
+    conversation_id: Optional[str] = None,
+    source_type: Optional[str] = None,
+    db_path: Optional[Path] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Retrieves accessible RAG chunks with strict access-control boundaries:
+      - If conversation_id is provided: returns chunks belonging to that conversation
+        PLUS global reference chunks (conversation_id IS NULL).
+      - If conversation_id is None: returns ONLY global reference chunks.
+      - Never leaks chunks belonging to a different conversation.
+    """
+    with get_connection(db_path) as conn:
+        conditions = []
+        params: List[Any] = []
+
+        if conversation_id:
+            conditions.append("(conversation_id = ? OR conversation_id IS NULL)")
+            params.append(conversation_id)
+        else:
+            conditions.append("conversation_id IS NULL")
+
+        if source_type:
+            conditions.append("source_type = ?")
+            params.append(source_type)
+
+        where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
+        sql = f"""
+            SELECT chunk_id, doc_id, conversation_id, source_type, source_name,
+                   page_number, chunk_index, content, metadata_json, created_at
+            FROM rag_chunks
+            {where_clause}
+            ORDER BY source_name ASC, chunk_index ASC;
+        """
+        cur = conn.execute(sql, tuple(params))
+        rows = cur.fetchall()
+
+    return [
+        {
+            "chunk_id": r["chunk_id"],
+            "doc_id": r["doc_id"],
+            "conversation_id": r["conversation_id"],
+            "source_type": r["source_type"],
+            "source_name": r["source_name"],
+            "page_number": r["page_number"],
+            "chunk_index": r["chunk_index"],
+            "content": r["content"],
+            "metadata_json": r["metadata_json"],
+            "created_at": r["created_at"],
+        }
+        for r in rows
+    ]
 
 
 # Auto-init on module import

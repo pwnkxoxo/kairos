@@ -33,6 +33,10 @@ from backend.search_service import (
     is_tavily_configured,
     should_search_web,
 )
+from backend.weather_service import (
+    handle_weather_query,
+    is_weather_query,
+)
 from backend.pdf_service import (
     MAX_IMAGE_BYTES,
     MAX_PDF_BYTES,
@@ -399,6 +403,48 @@ def chat(request: ChatRequest) -> ChatResponse:
             supported=False,
             intent="general_question",
             mode="system_clock",
+            plan=[],
+            file_preview=None,
+        )
+
+    # --------------------------------------------------------------------------
+    # 0.5 Weather Handling (Open-Meteo Geocoding & Real-time Forecast)
+    # --------------------------------------------------------------------------
+    if is_weather_query(clean_message):
+        weather_result = handle_weather_query(clean_message)
+        w_status = weather_result.get("status", "success")
+        w_msg = weather_result.get("message", "")
+        mode_str = (
+            "weather_service"
+            if w_status == "success"
+            else "weather_clarification"
+            if w_status == "clarification_needed"
+            else "weather_error"
+        )
+        disclaimer = "Retrieved via Open-Meteo meteorological and geocoding services."
+        if weather_result.get("cached"):
+            disclaimer += " (from recent 10-minute cache)"
+
+        add_message(
+            conversation_id=conv_id,
+            role="assistant",
+            content=w_msg,
+            metadata={
+                "status": "unsupported",
+                "intent": "general_question",
+                "mode": mode_str,
+                "location": weather_result.get("location"),
+            },
+        )
+        return ChatResponse(
+            action_id=None,
+            conversation_id=conv_id,
+            status="unsupported",
+            message=w_msg,
+            ai_disclaimer=disclaimer,
+            supported=False,
+            intent="general_question",
+            mode=mode_str,
             plan=[],
             file_preview=None,
         )

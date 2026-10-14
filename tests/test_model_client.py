@@ -354,6 +354,42 @@ class TestModelClient(unittest.TestCase):
             generate_gemma_plan("User message", provider=mock_provider)
         self.assertIn("invalid JSON", str(ctx.exception))
 
+    def test_parse_latex_math_formulas_repaired_successfully(self):
+        """LaTeX formulas with \frac, \begin, \theta are safely repaired and preserved."""
+        raw = r'''{
+            "supported": false,
+            "intent": "general_question",
+            "assistant_message": "The formula is $\frac{a}{b}$ and $\begin{matrix} 1 & 0 \\ 0 & 1 \end{matrix}$ with angle $\theta$."
+        }'''
+        plan = parse_and_validate_model_output(raw, model_name="gemma-4-26b-a4b-it")
+        self.assertFalse(plan.supported)
+        self.assertIn("frac", plan.assistant_message)
+        self.assertIn("theta", plan.assistant_message)
+
+    def test_parse_long_assistant_message(self):
+        """Long assistant messages up to 64000 characters parse without schema validation error."""
+        long_text = "Here is a detailed explanation of the concept:\n" + ("Point explanation. " * 1500)
+        raw = f'''{{
+            "supported": false,
+            "intent": "general_question",
+            "assistant_message": "{long_text}"
+        }}'''
+        plan = parse_and_validate_model_output(raw, model_name="gemma-4-26b-a4b-it")
+        self.assertFalse(plan.supported)
+        self.assertGreater(len(plan.assistant_message), 10000)
+
+    def test_parse_json_with_unescaped_quotes_recovery(self):
+        """JSON output with unescaped internal double quotes recovers assistant_message."""
+        raw = '''{
+            "supported": false,
+            "intent": "general_question",
+            "assistant_message": "He said "hello world" to everyone.",
+            "plan_description": ""
+        }'''
+        plan = parse_and_validate_model_output(raw, model_name="gemma-4-26b-a4b-it")
+        self.assertFalse(plan.supported)
+        self.assertIn("hello world", plan.assistant_message)
+
 
 if __name__ == "__main__":
     unittest.main()
