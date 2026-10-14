@@ -390,6 +390,43 @@ class TestModelClient(unittest.TestCase):
         self.assertFalse(plan.supported)
         self.assertIn("hello world", plan.assistant_message)
 
+    def test_get_active_provider_rejects_unsupported(self):
+        """Unsupported provider name raises ModelClientError."""
+        with self.assertRaises(ModelClientError) as ctx:
+            get_active_provider("unsupported_claude_openai")
+        self.assertIn("Unsupported model provider", str(ctx.exception))
+
+    def test_local_model_provider_requires_endpoint(self):
+        """LocalModelProvider raises ModelClientError if endpoint is unconfigured."""
+        from backend.model_client import LocalModelProvider
+        prov = LocalModelProvider(endpoint="")
+        self.assertFalse(prov.is_available())
+        with self.assertRaises(ModelClientError) as ctx:
+            prov.generate(ModelRequest(prompt="test"))
+        self.assertIn("KAIROS_LOCAL_MODEL_ENDPOINT is not configured", str(ctx.exception))
+
+    def test_answer_with_rag_grounded_synthesis(self):
+        """answer_with_rag formats evidence and calls provider with grounding instructions."""
+        from unittest.mock import MagicMock
+        from backend.model_client import answer_with_rag
+
+        mock_provider = MagicMock(spec=BaseModelProvider)
+        mock_provider.is_available.return_value = True
+        mock_provider.generate.return_value = ModelResponse(
+            text="According to [Networking.pdf, Page 7], TCP provides reliable delivery.",
+            model_name="gemma-4-26b-a4b-it",
+        )
+
+        ans = answer_with_rag(
+            user_question="What does TCP provide?",
+            rag_evidence="[Source 1]: Networking.pdf (Page 7)\nTCP provides reliable ordered byte stream delivery.",
+            provider=mock_provider,
+        )
+        self.assertIn("Networking.pdf", ans)
+        sent_prompt = mock_provider.generate.call_args[0][0].prompt
+        self.assertIn("--- RETRIEVED EVIDENCE START ---", sent_prompt)
+        self.assertIn("Networking.pdf (Page 7)", sent_prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

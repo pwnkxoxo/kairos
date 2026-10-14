@@ -430,9 +430,9 @@ class TestLocalStorageAndHistory(unittest.TestCase):
         init_db(old_db_path)
 
         with get_connection(old_db_path) as conn:
-            # Verify version is now 2
+            # Verify version is now 3 (latest schema version)
             v_row = conn.execute("SELECT MAX(version) AS ver FROM schema_version;").fetchone()
-            self.assertEqual(v_row["ver"], 2)
+            self.assertEqual(v_row["ver"], 3)
 
             # Verify existing data preserved
             c_row = conn.execute("SELECT title FROM conversations WHERE id = 'c1';").fetchone()

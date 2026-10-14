@@ -102,9 +102,9 @@ def extract_location_from_query(query: str) -> Optional[str]:
 
     # Match patterns like: "in <place>", "for <place>", "at <place>", "around <place>"
     patterns = [
-        r"\b(?:in|for|at|around)\s+([A-Za-z\s,.-]+?)(?:\s+(?:today|tomorrow|now|right\s+now|this\s+week|\?|$))",
-        r"\b(?:weather|forecast|temperature|temp)\s+(?:of|in|for|at)\s+([A-Za-z\s,.-]+?)(?:\?|$)",
-        r"^([A-Za-z\s,.-]+?)\s+weather\??$",
+        r"\b(?:in|for|at|around)\s+([A-Za-z0-9_\s,.-]+?)(?:\s+(?:today|tomorrow|now|right\s+now|this\s+week|\?|$))",
+        r"\b(?:weather|forecast|temperature|temp)\s+(?:of|in|for|at)\s+([A-Za-z0-9_\s,.-]+?)(?:\?|$)",
+        r"^([A-Za-z0-9_\s,.-]+?)\s+weather\??$",
     ]
 
     for pat in patterns:
@@ -378,15 +378,26 @@ def handle_weather_query(
 
     cache_note = "\n\n*(Retrieved from recent 10-minute cache)*" if weather.get("cached") else ""
 
+    temp_c = weather.get("temperature_c", 0.0)
+    temp_f = weather.get("temperature_f", round((temp_c * 9 / 5) + 32, 1))
+    apparent_c = weather.get("apparent_temperature_c", temp_c)
+    apparent_f = weather.get("apparent_temperature_f", round((apparent_c * 9 / 5) + 32, 1))
+    humidity = weather.get("humidity_percent", "N/A")
+    wind = weather.get("wind_speed_kmh", 0.0)
+    precip = weather.get("precipitation_mm", 0.0)
+    tz_str = weather.get("timezone", "UTC")
+    cond_desc = weather.get("condition_description", "Reported conditions")
+    cond_emoji = weather.get("condition_emoji", "🌤️")
+
     formatted_msg = (
-        f"### {weather['condition_emoji']} Weather for **{full_loc_str}**\n\n"
-        f"- **Condition:** {weather['condition_description']} {weather['condition_emoji']}\n"
-        f"- **Temperature:** **{weather['temperature_c']}°C** ({weather['temperature_f']}°F)\n"
-        f"- **Feels Like:** {weather['apparent_temperature_c']}°C ({weather['apparent_temperature_f']}°F)\n"
-        f"- **Relative Humidity:** {weather['humidity_percent']}%\n"
-        f"- **Wind Speed:** {weather['wind_speed_kmh']} km/h\n"
-        f"- **Precipitation:** {weather['precipitation_mm']} mm\n"
-        f"- **Timezone:** {weather['timezone']}"
+        f"### {cond_emoji} Weather for **{full_loc_str}**\n\n"
+        f"- **Condition:** {cond_desc} {cond_emoji}\n"
+        f"- **Temperature:** **{temp_c}°C** ({temp_f}°F)\n"
+        f"- **Feels Like:** {apparent_c}°C ({apparent_f}°F)\n"
+        f"- **Relative Humidity:** {humidity}%\n"
+        f"- **Wind Speed:** {wind} km/h\n"
+        f"- **Precipitation:** {precip} mm\n"
+        f"- **Timezone:** {tz_str}"
         f"{cache_note}"
     )
 
