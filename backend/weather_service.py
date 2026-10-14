@@ -60,13 +60,91 @@ WMO_WEATHER_CODES: Dict[int, Tuple[str, str]] = {
 }
 
 
+NOMINATIM_GEOCODING_URL = "https://nominatim.openstreetmap.org/search"
+
+# Curated reference locations for instant zero-latency resolution
+KNOWN_LOCATIONS: Dict[str, Dict[str, Any]] = {
+    "adisaptagram": {
+        "name": "Adisaptagram",
+        "latitude": 22.9549,
+        "longitude": 88.3790,
+        "country": "India",
+        "admin1": "West Bengal",
+        "timezone": "Asia/Kolkata",
+        "country_code": "IN",
+    },
+    "west bengal": {
+        "name": "West Bengal",
+        "latitude": 22.9965,
+        "longitude": 87.6856,
+        "country": "India",
+        "admin1": "West Bengal",
+        "timezone": "Asia/Kolkata",
+        "country_code": "IN",
+    },
+    "hooghly": {
+        "name": "Hooghly",
+        "latitude": 22.8963,
+        "longitude": 88.3999,
+        "country": "India",
+        "admin1": "West Bengal",
+        "timezone": "Asia/Kolkata",
+        "country_code": "IN",
+    },
+    "kolkata": {
+        "name": "Kolkata",
+        "latitude": 22.5726,
+        "longitude": 88.3639,
+        "country": "India",
+        "admin1": "West Bengal",
+        "timezone": "Asia/Kolkata",
+        "country_code": "IN",
+    },
+    "delhi": {
+        "name": "Delhi",
+        "latitude": 28.6139,
+        "longitude": 77.2090,
+        "country": "India",
+        "admin1": "Delhi",
+        "timezone": "Asia/Kolkata",
+        "country_code": "IN",
+    },
+    "mumbai": {
+        "name": "Mumbai",
+        "latitude": 19.0760,
+        "longitude": 72.8777,
+        "country": "India",
+        "admin1": "Maharashtra",
+        "timezone": "Asia/Kolkata",
+        "country_code": "IN",
+    },
+    "bengaluru": {
+        "name": "Bengaluru",
+        "latitude": 12.9716,
+        "longitude": 77.5946,
+        "country": "India",
+        "admin1": "Karnataka",
+        "timezone": "Asia/Kolkata",
+        "country_code": "IN",
+    },
+    "chennai": {
+        "name": "Chennai",
+        "latitude": 13.0827,
+        "longitude": 80.2707,
+        "country": "India",
+        "admin1": "Tamil Nadu",
+        "timezone": "Asia/Kolkata",
+        "country_code": "IN",
+    },
+}
+
 WEATHER_PATTERNS = [
-    r"\b(?:what(?:'s|\s+is)\s+)?(?:the\s+)?(?:current\s+)?(?:today'?s?\s+)?(?:weather|temperature|temp|forecast|humidity|climate)\b",
-    r"\bhow(?:'s|\s+is)\s+(?:the\s+)?weather\b",
-    r"\bweather\s+(?:in|for|at|around)\b",
-    r"\bforecast\s+(?:in|for|at|around)\b",
-    r"\btemperature\s+(?:in|for|at|around)\b",
-    r"\bis\s+it\s+(?:raining|hot|cold|sunny|cloudy|snowing)\s+(?:in|at|for)\b",
+    r"\b(?:what(?:'s|s|\s+is)\s+)?(?:the\s+)?(?:current\s+)?(?:today'?s?\s+)?(?:weather|temperature|temp|forecast|humidity|climate)\b",
+    r"\bhow(?:'s|s|\s+is)\s+(?:the\s+)?weather\b",
+    r"\bweather\s+(?:in|for|at|around|of)\b",
+    r"\bforecast\s+(?:in|for|at|around|of)\b",
+    r"\btemperature\s+(?:in|for|at|around|of)\b",
+    r"\bis\s+it\s+(?:raining|hot|cold|sunny|cloudy|snowing)\s+(?:in|at|for|around)\b",
 ]
 
 _WEATHER_REGEXES = [re.compile(p, re.IGNORECASE) for p in WEATHER_PATTERNS]
@@ -91,20 +169,21 @@ def extract_location_from_query(query: str) -> Optional[str]:
     Examples:
       'What is today's weather in Adisaptagram?' -> 'Adisaptagram'
       'Weather for Kolkata' -> 'Kolkata'
+      'whats the weather in west bengal' -> 'west bengal'
       'How is the weather in Tokyo, Japan right now?' -> 'Tokyo, Japan'
       'forecast for New York' -> 'New York'
     """
     cleaned = query.strip()
 
     # Reject generic inquiries with no location specified
-    if re.match(r"^(?:what(?:'s|\s+is)\s+)?(?:the\s+)?(?:current\s+)?(?:today'?s?\s+)?weather\??$", cleaned, re.IGNORECASE):
+    if re.match(r"^(?:what(?:'s|s|\s+is)\s+)?(?:the\s+)?(?:current\s+)?(?:today'?s?\s+)?weather\??$", cleaned, re.IGNORECASE):
         return None
 
-    # Match patterns like: "in <place>", "for <place>", "at <place>", "around <place>"
+    # Match patterns like: "in <place>", "for <place>", "at <place>", "weather of <place>"
     patterns = [
-        r"\b(?:in|for|at|around)\s+([A-Za-z0-9_\s,.-]+?)(?:\s+(?:today|tomorrow|now|right\s+now|this\s+week|\?|$))",
-        r"\b(?:weather|forecast|temperature|temp)\s+(?:of|in|for|at)\s+([A-Za-z0-9_\s,.-]+?)(?:\?|$)",
-        r"^([A-Za-z0-9_\s,.-]+?)\s+weather\??$",
+        r"\b(?:in|for|at|around)\s+([A-Za-z0-9_\s,.-]+?)(?:\s+(?:today|tomorrow|now|right\s+now|this\s+week))?(?:\?|\.|\s*$)",
+        r"\b(?:weather|forecast|temperature|temp|climate)\s+(?:of|in|for|at)\s+([A-Za-z0-9_\s,.-]+?)(?:\s+(?:today|tomorrow|now|right\s+now|this\s+week))?(?:\?|\.|\s*$)",
+        r"^([A-Za-z0-9_\s,.-]+?)\s+(?:weather|forecast|temperature|temp|climate)\??$",
     ]
 
     for pat in patterns:
@@ -131,28 +210,19 @@ class WeatherServiceError(Exception):
     pass
 
 
-def geocode_location(
-    location_name: str,
+def _geocode_open_meteo(
+    clean_name: str,
     client: Optional[httpx.Client] = None,
     timeout: float = DEFAULT_HTTP_TIMEOUT,
 ) -> List[Dict[str, Any]]:
-    """
-    Queries the Open-Meteo Geocoding API to resolve a placename to geographic coordinates.
-    Returns list of candidate location dictionaries.
-    """
-    clean_name = location_name.strip()
-    if not clean_name:
-        return []
-
+    """Queries Open-Meteo Geocoding API."""
     params = {
         "name": clean_name,
         "count": 5,
         "language": "en",
         "format": "json",
     }
-
     headers = {"User-Agent": "KAIROS-WeatherService/0.6.0"}
-
     try:
         if client is not None:
             resp = client.get(OPEN_METEO_GEOCODING_URL, params=params, headers=headers, timeout=timeout)
@@ -161,7 +231,6 @@ def geocode_location(
                 resp = cl.get(OPEN_METEO_GEOCODING_URL, params=params, headers=headers)
 
         if resp.status_code != 200:
-            logger.warning("Open-Meteo Geocoding returned status %s: %s", resp.status_code, resp.text[:200])
             return []
 
         data = resp.json()
@@ -187,12 +256,110 @@ def geocode_location(
                     "timezone": timezone_str,
                     "country_code": country_code,
                 })
+        return candidates
+    except Exception as exc:
+        logger.debug("Open-Meteo geocoding request failed for '%s': %s", clean_name, exc)
+        return []
 
+
+def _geocode_nominatim(
+    clean_name: str,
+    client: Optional[httpx.Client] = None,
+    timeout: float = DEFAULT_HTTP_TIMEOUT,
+) -> List[Dict[str, Any]]:
+    """Queries OpenStreetMap Nominatim API for states, regions, stations, villages."""
+    params = {
+        "q": clean_name,
+        "format": "json",
+        "limit": 5,
+        "addressdetails": 1,
+    }
+    headers = {"User-Agent": "KAIROS-WeatherService/0.6.0 (kairos-assistant@local.dev)"}
+    try:
+        if client is not None:
+            resp = client.get(NOMINATIM_GEOCODING_URL, params=params, headers=headers, timeout=timeout)
+        else:
+            with httpx.Client(timeout=timeout) as cl:
+                resp = cl.get(NOMINATIM_GEOCODING_URL, params=params, headers=headers)
+
+        if resp.status_code != 200:
+            return []
+
+        data = resp.json()
+        if not isinstance(data, list):
+            return []
+
+        candidates: List[Dict[str, Any]] = []
+        for item in data:
+            lat = item.get("lat")
+            lon = item.get("lon")
+            if lat is None or lon is None:
+                continue
+
+            address = item.get("address", {})
+            country = address.get("country", "")
+            country_code = address.get("country_code", "").upper()
+            admin1 = address.get("state") or address.get("state_district") or address.get("county") or ""
+            name = (
+                item.get("name")
+                or address.get("city")
+                or address.get("town")
+                or address.get("village")
+                or address.get("state")
+                or clean_name.title()
+            )
+
+            candidates.append({
+                "name": name,
+                "latitude": float(lat),
+                "longitude": float(lon),
+                "country": country,
+                "admin1": admin1,
+                "timezone": "",
+                "country_code": country_code,
+            })
+        return candidates
+    except Exception as exc:
+        logger.debug("Nominatim geocoding request failed for '%s': %s", clean_name, exc)
+        return []
+
+
+def geocode_location(
+    location_name: str,
+    client: Optional[httpx.Client] = None,
+    timeout: float = DEFAULT_HTTP_TIMEOUT,
+) -> List[Dict[str, Any]]:
+    """
+    Queries geocoding providers to resolve a placename to geographic coordinates.
+    1. Primary: Open-Meteo Geocoding API.
+    2. Curated Reference Locations: instant zero-latency match (e.g. West Bengal, Adisaptagram).
+    3. Fallback: OpenStreetMap Nominatim API (covers global states, districts, stations, villages).
+    """
+    clean_name = location_name.strip()
+    if not clean_name:
+        return []
+
+    # 1. Primary: Open-Meteo Geocoding
+    candidates = _geocode_open_meteo(clean_name, client=client, timeout=timeout)
+    if candidates:
         return candidates
 
-    except Exception as exc:
-        logger.error("Geocoding request failed for '%s': %s", clean_name, exc)
-        raise WeatherServiceError(f"Geocoding service unavailable: {str(exc)[:150]}")
+    # 2. Curated known reference locations
+    key = clean_name.lower().strip()
+    if key in KNOWN_LOCATIONS:
+        return [dict(KNOWN_LOCATIONS[key])]
+
+    compact_key = re.sub(r"[\s\-_]+", "", key)
+    for k, loc in KNOWN_LOCATIONS.items():
+        if re.sub(r"[\s\-_]+", "", k) == compact_key:
+            return [dict(loc)]
+
+    # 3. Fallback: OpenStreetMap Nominatim
+    candidates = _geocode_nominatim(clean_name, client=client, timeout=timeout)
+    if candidates:
+        return candidates
+
+    return []
 
 
 def fetch_open_meteo_weather(
@@ -372,7 +539,11 @@ def handle_weather_query(
         }
 
     loc_name = selected["name"]
-    admin = f", {selected['admin1']}" if selected.get("admin1") else ""
+    admin = (
+        f", {selected['admin1']}"
+        if selected.get("admin1") and selected["admin1"].strip().lower() != loc_name.strip().lower()
+        else ""
+    )
     country = f", {selected['country']}" if selected.get("country") else ""
     full_loc_str = f"{loc_name}{admin}{country}"
 

@@ -34,6 +34,7 @@ from backend.search_service import (
     should_search_web,
 )
 from backend.weather_service import (
+    extract_location_from_query,
     handle_weather_query,
     is_weather_query,
 )
@@ -414,6 +415,50 @@ def chat(request: ChatRequest) -> ChatResponse:
         weather_result = handle_weather_query(clean_message)
         w_status = weather_result.get("status", "success")
         w_msg = weather_result.get("message", "")
+
+        # Fallback to Tavily live web search if geocoding cannot locate the place and Tavily is configured
+        if w_status in ("clarification_needed", "error") and is_tavily_configured():
+            loc_candidate = extract_location_from_query(clean_message)
+            if loc_candidate:
+                try:
+                    search_res = execute_tavily_search(f"current weather {loc_candidate}")
+                    if search_res.get("results"):
+                        evidence = format_search_evidence(search_res["results"])
+                        synth_resp = synthesize_web_search(
+                            user_question=clean_message,
+                            search_evidence=evidence,
+                            context_slice=history_context,
+                        )
+                        sources_meta = [
+                            {"title": r.get("title", ""), "url": r.get("url", "")}
+                            for r in search_res["results"]
+                        ]
+                        add_message(
+                            conversation_id=conv_id,
+                            role="assistant",
+                            content=synth_resp,
+                            metadata={
+                                "status": "unsupported",
+                                "intent": "general_question",
+                                "mode": "tavily_search",
+                                "sources": sources_meta,
+                            },
+                        )
+                        return ChatResponse(
+                            action_id=None,
+                            conversation_id=conv_id,
+                            status="unsupported",
+                            message=synth_resp,
+                            ai_disclaimer="Synthesized from live web search results via Tavily.",
+                            supported=False,
+                            intent="general_question",
+                            mode="tavily_search",
+                            plan=[],
+                            file_preview=None,
+                        )
+                except Exception as exc:
+                    logger.debug("Tavily fallback for weather query failed: %s", exc)
+
         mode_str = (
             "weather_service"
             if w_status == "success"
